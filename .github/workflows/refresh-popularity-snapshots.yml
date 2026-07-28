@@ -1,0 +1,128 @@
+name: Apple App Store price monitor
+
+on:
+  schedule:
+    - cron: "15 * * * *"
+    - cron: "45 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hot-app-store-price-monitor
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
+      R2_BUCKET_NAME: ${{ secrets.CATALOG_R2_BUCKET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Select deterministic App and storefront shard
+        run: |
+          SHARD=$(( $(date -u +%H) % 20 ))
+          if [ "$(date -u +%M)" = "15" ]; then
+            LANE=ai
+          else
+            LANE=regional
+          fi
+          node scripts/select-apple-monitor-shard.mjs --lane "$LANE" --shard "$SHARD" | tee shard.env
+          cat shard.env >> "$GITHUB_ENV"
+
+      - name: Verify Apple price parser
+        run: npm run test:apple-price-parser
+
+      - name: Prepare Apple refresh tables
+        run: npm run apple:prices:init -- --remote
+
+      - name: Queue Apple official price refresh
+        run: npm run apple:prices:enqueue -- --remote --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 2 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --pages-only --force
+
+      - name: Reset stale running jobs
+        run: npm run apple:prices:reset-running -- --remote
+
+      - name: Run Apple official price refresh
+        env:
+          APPLE_REFRESH_BATCH: 8
+          APPLE_REFRESH_DELAY_MIN_MS: 12000
+          APPLE_REFRESH_DELAY_MAX_MS: 18000
+          APPLE_REFRESH_QUIET: "1"
+        run: npm run apple:prices:run -- --remote --source apple_app_store_page --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 2 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --selected-apps-only --batch 8
+
+      - name: Evaluate detected price events and queue regional fanout
+        id: evaluate
+        run: |
+          RESULT=$(npm run apple:monitor:publish-state -- evaluate --remote --publish-mode immediate | tail -n 1)
+          echo "$RESULT"
+          npm run apple:monitor:fanout-state -- stats --remote
+          FANOUT=$(printf '%s' "$RESULT" | jq -r '.regionFanoutStorefronts | join(" ")')
+          echo "fanout_storefronts=$FANOUT" >> "$GITHUB_OUTPUT"
+
+      - name: Claim one regional fanout slice
+        id: claim_fanout
+        run: |
+          RESULT=$(npm run apple:monitor:fanout-state -- claim --remote | tail -n 1)
+          echo "$RESULT"
+          echo "claimed=$(printf '%s' "$RESULT" | jq -r '.claimed')" >> "$GITHUB_OUTPUT"
+          echo "storefront=$(printf '%s' "$RESULT" | jq -r '.storefrontCode // empty')" >> "$GITHUB_OUTPUT"
+          echo "reset_jobs=$(printf '%s' "$RESULT" | jq -r '.resetJobs // false')" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh one regional fanout slice
+        id: run_fanout
+        if: steps.claim_fanout.outputs.claimed == 'true'
+        env:
+          APPLE_REFRESH_BATCH: 64
+          APPLE_REFRESH_DELAY_MIN_MS: 12000
+          APPLE_REFRESH_DELAY_MAX_MS: 18000
+          APPLE_REFRESH_QUIET: "1"
+          FANOUT_STOREFRONT: ${{ steps.claim_fanout.outputs.storefront }}
+        run: |
+          FORCE_ARGS=""
+          if [ "${{ steps.claim_fanout.outputs.reset_jobs }}" = "true" ]; then
+            FORCE_ARGS="--force"
+          fi
+          npm run apple:prices:enqueue -- --remote \
+            --app-tier popular --tier-popular-limit 500 --recent-click-days 3 \
+            --app-limit 500 --storefront-limit 1 --storefront "$FANOUT_STOREFRONT" \
+            --pages-only $FORCE_ARGS
+          if [ "${{ steps.claim_fanout.outputs.reset_jobs }}" = "true" ]; then
+            npm run apple:monitor:fanout-state -- mark-reset --remote --storefront "$FANOUT_STOREFRONT"
+          fi
+          npm run apple:prices:run -- --remote --source apple_app_store_page \
+            --app-tier popular --tier-popular-limit 500 --recent-click-days 3 \
+            --app-limit 500 --storefront-limit 1 --storefront "$FANOUT_STOREFRONT" \
+            --selected-apps-only --batch 64
+
+      - name: Mark regional fanout slice complete
+        if: always() && steps.claim_fanout.outputs.claimed == 'true' && steps.run_fanout.outcome == 'success'
+        env:
+          FANOUT_STOREFRONT: ${{ steps.claim_fanout.outputs.storefront }}
+        run: npm run apple:monitor:fanout-state -- complete --remote --storefront "$FANOUT_STOREFRONT"
+
+      - name: Requeue failed regional fanout slice
+        if: always() && steps.claim_fanout.outputs.claimed == 'true' && steps.run_fanout.outcome == 'failure'
+        env:
+          FANOUT_STOREFRONT: ${{ steps.claim_fanout.outputs.storefront }}
+          APPLE_FANOUT_ERROR: Regional fanout slice failed
+        run: npm run apple:monitor:fanout-state -- complete --remote --storefront "$FANOUT_STOREFRONT" --failed

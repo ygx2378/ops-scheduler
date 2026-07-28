@@ -1,0 +1,47 @@
+name: Drain crawl jobs backlog
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare Apple refresh tables
+        run: npm run apple:prices:init -- --remote
+
+      - name: Reset stale running jobs
+        run: npm run apple:prices:reset-running -- --remote
+
+      - name: Drain apple_lookup backlog
+        env:
+          APPLE_REFRESH_DELAY_MIN_MS: 1500
+          APPLE_REFRESH_DELAY_MAX_MS: 3000
+          APPLE_REFRESH_QUIET: "1"
+        run: npm run apple:prices:run -- --remote --source apple_lookup --batch 60

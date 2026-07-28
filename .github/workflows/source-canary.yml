@@ -1,0 +1,26 @@
+name: Verify private source checkout
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Verify source workspace
+        run: |
+          test -f package.json
+          test -d scripts
+          echo "source_commit=$(git rev-parse HEAD)"
+          node --version

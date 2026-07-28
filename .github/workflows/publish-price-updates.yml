@@ -1,0 +1,143 @@
+name: Publish verified App Store price updates
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+    - cron: "30 19 * * 6"
+  workflow_dispatch:
+    inputs:
+      publish_mode:
+        description: "immediate publishes major events; cycle publishes all pending events"
+        required: false
+        default: immediate
+        type: choice
+        options:
+          - immediate
+          - cycle
+
+permissions:
+  contents: write
+
+concurrency:
+  group: price-static-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
+      R2_BUCKET_NAME: ${{ secrets.CATALOG_R2_BUCKET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PUBLISH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_mode || (github.event.schedule == '30 19 * * 6' && 'cycle' || 'immediate') }}
+
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare monitoring schema
+        run: npm run apple:prices:init -- --remote
+
+      - name: Evaluate pending events
+        id: evaluate
+        run: |
+          set -euo pipefail
+          OUTPUT=$(mktemp)
+          trap 'rm -f "$OUTPUT"' EXIT
+          npm run apple:monitor:publish-state -- evaluate --remote --publish-mode "$PUBLISH_MODE" | tee "$OUTPUT"
+          RESULT=$(awk 'NF { line = $0 } END { print line }' "$OUTPUT")
+          jq -e '.eligibleCount != null' >/dev/null <<<"$RESULT"
+          echo "eligible_count=$(jq -r '.eligibleCount' <<<"$RESULT")" >> "$GITHUB_OUTPUT"
+
+      - name: Claim a publish batch
+        id: claim
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: |
+          set -euo pipefail
+          OUTPUT=$(mktemp)
+          trap 'rm -f "$OUTPUT"' EXIT
+          npm run apple:monitor:publish-state -- claim --remote --publish-mode "$PUBLISH_MODE" | tee "$OUTPUT"
+          RESULT=$(awk 'NF { line = $0 } END { print line }' "$OUTPUT")
+          BATCH_ID=$(jq -r '.batchId // empty' <<<"$RESULT")
+          test -n "$BATCH_ID"
+          echo "batch_id=$BATCH_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh popular-500 R2 snapshots
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: npm run r2:refresh-daily-popular-snapshots
+
+      - name: Regenerate static price inputs
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: |
+          set -euo pipefail
+          npm run static:hydrate-full-category-source
+          npm run static:generate-page-snapshots
+          npm run static:generate-fast-data
+
+      - name: Build updated static site
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: npm run cf:build
+
+      - name: Upload OpenNext cache to R2
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: OPEN_NEXT_CACHE_UPLOAD_CONCURRENCY=4 npm run cf:upload-cache
+
+      - name: Deploy updated static site
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: OPEN_NEXT_DEPLOY=true npx wrangler deploy
+
+      - name: Prewarm public pages
+        id: prewarm
+        if: steps.evaluate.outputs.eligible_count != '0'
+        run: npm run cf:prewarm
+
+      - name: Complete successful publish batch
+        if: always() && steps.claim.outputs.batch_id != '' && steps.prewarm.outcome == 'success'
+        env:
+          BATCH_ID: ${{ steps.claim.outputs.batch_id }}
+        run: npm run apple:monitor:publish-state -- complete --remote --batch-id "$BATCH_ID"
+
+      - name: Requeue failed publish batch
+        if: always() && steps.claim.outputs.batch_id != '' && steps.prewarm.outcome != 'success'
+        env:
+          BATCH_ID: ${{ steps.claim.outputs.batch_id }}
+          PRICE_PUBLISH_ERROR: Workflow failed before publish completion
+        run: npm run apple:monitor:publish-state -- complete --remote --batch-id "$BATCH_ID" --failed
+
+      - name: Assert publish pipeline completed
+        if: always()
+        env:
+          ELIGIBLE_COUNT: ${{ steps.evaluate.outputs.eligible_count }}
+          PREWARM_OUTCOME: ${{ steps.prewarm.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "${ELIGIBLE_COUNT:-0}" != "0" && "${PREWARM_OUTCOME:-skipped}" != "success" ]]; then
+            echo "Publish batch did not reach successful prewarm: eligible=${ELIGIBLE_COUNT:-unknown}, prewarm=${PREWARM_OUTCOME:-unknown}" >&2
+            exit 1
+          fi
+
+      - name: Commit refreshed static inputs
+        if: success() && steps.evaluate.outputs.eligible_count != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build-data/static-page-snapshots.json src/lib/catalog/static-fast-data.ts
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): publish verified App Store price updates"
+            git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+          fi
