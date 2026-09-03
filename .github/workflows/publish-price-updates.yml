@@ -61,6 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${R2_BUCKET_NAME:-}"
+          test -n "${D1_DATABASE_NAME:-}"
           test -n "${PRICE_ASSETS_WORKER_NAME:-}"
           test -n "${PRICE_ASSETS_PUBLIC_URL:-}"
           test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
@@ -160,13 +161,15 @@ jobs:
             --batch-id='${{ steps.claim_events.outputs.batch_id }}' \
             --out="$RUNNER_TEMP/price-assets-event"
           npm run prices:validate -- --dir="$RUNNER_TEMP/price-assets-event"
+          BASE_RELEASE_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.releaseId)" "$BASE_DIR/v1/manifest.json.gz")
           RELEASE_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.releaseId)" "$RUNNER_TEMP/price-assets-event/v1/manifest.json.gz")
           npm run prices:archive -- \
             --dir="$RUNNER_TEMP/price-assets-event" \
             --out="$RUNNER_TEMP/${RELEASE_ID}.tar.gz"
           npm run prices:archive:upload -- \
             --archive="$RUNNER_TEMP/${RELEASE_ID}.tar.gz" \
-            --transport=wrangler
+            --transport=wrangler \
+            --expected-base-release="$BASE_RELEASE_ID"
           npm run prices:publish -- \
             --dir="$RUNNER_TEMP/price-assets-event" \
             --target=production \
