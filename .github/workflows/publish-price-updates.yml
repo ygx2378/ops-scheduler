@@ -1,22 +1,18 @@
-name: Publish verified App Store price updates
+name: Publish static per-App price assets
 
 on:
   schedule:
-    - cron: "5 * * * *"
-    - cron: "30 19 * * 6"
+    - cron: "35 * * * *"
   workflow_dispatch:
     inputs:
-      publish_mode:
-        description: "immediate publishes major events; cycle publishes all pending events"
+      manifest_key:
+        description: "Optional immutable R2 manifest key; empty uses price-assets/latest.json"
         required: false
-        default: immediate
-        type: choice
-        options:
-          - immediate
-          - cycle
+        default: ""
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: price-static-publish
@@ -25,13 +21,13 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     env:
-      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
-      R2_BUCKET_NAME: ${{ secrets.CATALOG_R2_BUCKET }}
+      R2_BUCKET_NAME: ${{ secrets.PRICE_ASSETS_ARCHIVE_BUCKET }}
+      PRICE_ASSETS_WORKER_NAME: ${{ secrets.PRICE_ASSETS_WORKER_NAME }}
+      PRICE_ASSETS_PUBLIC_URL: ${{ secrets.PRICE_ASSETS_PUBLIC_URL }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      PUBLISH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_mode || (github.event.schedule == '30 19 * * 6' && 'cycle' || 'immediate') }}
 
     steps:
       - name: Check out private source repository
@@ -50,94 +46,75 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Prepare monitoring schema
-        run: npm run apple:prices:init -- --remote
-
-      - name: Evaluate pending events
-        id: evaluate
+      - name: Check publishing configuration
         run: |
           set -euo pipefail
-          OUTPUT=$(mktemp)
-          trap 'rm -f "$OUTPUT"' EXIT
-          npm run apple:monitor:publish-state -- evaluate --remote --publish-mode "$PUBLISH_MODE" | tee "$OUTPUT"
-          RESULT=$(awk 'NF { line = $0 } END { print line }' "$OUTPUT")
-          jq -e '.eligibleCount != null' >/dev/null <<<"$RESULT"
-          echo "eligible_count=$(jq -r '.eligibleCount' <<<"$RESULT")" >> "$GITHUB_OUTPUT"
+          test -n "${R2_BUCKET_NAME:-}"
+          test -n "${PRICE_ASSETS_WORKER_NAME:-}"
+          test -n "${PRICE_ASSETS_PUBLIC_URL:-}"
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
+          test -n "${CLOUDFLARE_API_TOKEN:-}"
 
-      - name: Claim a publish batch
-        id: claim
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: |
-          set -euo pipefail
-          OUTPUT=$(mktemp)
-          trap 'rm -f "$OUTPUT"' EXIT
-          npm run apple:monitor:publish-state -- claim --remote --publish-mode "$PUBLISH_MODE" | tee "$OUTPUT"
-          RESULT=$(awk 'NF { line = $0 } END { print line }' "$OUTPUT")
-          BATCH_ID=$(jq -r '.batchId // empty' <<<"$RESULT")
-          test -n "$BATCH_ID"
-          echo "batch_id=$BATCH_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Refresh popular-500 R2 snapshots
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: npm run r2:refresh-daily-popular-snapshots
-
-      - name: Regenerate static price inputs
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: |
-          set -euo pipefail
-          npm run static:hydrate-full-category-source
-          npm run static:generate-page-snapshots
-          npm run static:generate-fast-data
-
-      - name: Build updated static site
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: npm run cf:build
-
-      - name: Upload OpenNext cache to R2
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: OPEN_NEXT_CACHE_UPLOAD_CONCURRENCY=4 npm run cf:upload-cache
-
-      - name: Deploy updated static site
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: OPEN_NEXT_DEPLOY=true npx wrangler deploy
-
-      - name: Prewarm public pages
-        id: prewarm
-        if: steps.evaluate.outputs.eligible_count != '0'
-        run: npm run cf:prewarm
-
-      - name: Complete successful publish batch
-        if: always() && steps.claim.outputs.batch_id != '' && steps.prewarm.outcome == 'success'
+      - name: Resolve latest immutable release
+        id: latest
         env:
-          BATCH_ID: ${{ steps.claim.outputs.batch_id }}
-        run: npm run apple:monitor:publish-state -- complete --remote --batch-id "$BATCH_ID"
-
-      - name: Requeue failed publish batch
-        if: always() && steps.claim.outputs.batch_id != '' && steps.prewarm.outcome != 'success'
-        env:
-          BATCH_ID: ${{ steps.claim.outputs.batch_id }}
-          PRICE_PUBLISH_ERROR: Workflow failed before publish completion
-        run: npm run apple:monitor:publish-state -- complete --remote --batch-id "$BATCH_ID" --failed
-
-      - name: Assert publish pipeline completed
-        if: always()
-        env:
-          ELIGIBLE_COUNT: ${{ steps.evaluate.outputs.eligible_count }}
-          PREWARM_OUTCOME: ${{ steps.prewarm.outcome }}
+          INPUT_MANIFEST_KEY: ${{ inputs.manifest_key }}
         run: |
           set -euo pipefail
-          if [[ "${ELIGIBLE_COUNT:-0}" != "0" && "${PREWARM_OUTCOME:-skipped}" != "success" ]]; then
-            echo "Publish batch did not reach successful prewarm: eligible=${ELIGIBLE_COUNT:-unknown}, prewarm=${PREWARM_OUTCOME:-unknown}" >&2
-            exit 1
+          if [[ -n "${INPUT_MANIFEST_KEY:-}" ]]; then
+            MANIFEST_KEY="$INPUT_MANIFEST_KEY"
+          else
+            npx wrangler r2 object get "$R2_BUCKET_NAME/price-assets/latest.json" --remote --file "$RUNNER_TEMP/latest.json"
+            MANIFEST_KEY=$(jq -er '.manifestKey' "$RUNNER_TEMP/latest.json")
           fi
+          npx wrangler r2 object get "$R2_BUCKET_NAME/$MANIFEST_KEY" --remote --file "$RUNNER_TEMP/target-manifest.json"
+          RELEASE_ID=$(jq -er '.releaseId' "$RUNNER_TEMP/target-manifest.json")
+          APP_COUNT=$(jq -er '.appCount' "$RUNNER_TEMP/target-manifest.json")
+          echo "manifest_key=$MANIFEST_KEY" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "target_app_count=$APP_COUNT" >> "$GITHUB_OUTPUT"
 
-      - name: Commit refreshed static inputs
-        if: success() && steps.evaluate.outputs.eligible_count != '0'
+      - name: Compare currently deployed release
+        id: compare
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add build-data/static-page-snapshots.json src/lib/catalog/static-fast-data.ts
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(data): publish verified App Store price updates"
-            git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+          set -euo pipefail
+          CURRENT_RELEASE=unknown
+          if curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/current-manifest.json"; then
+            CURRENT_RELEASE=$(jq -r '.releaseId // "unknown"' "$RUNNER_TEMP/current-manifest.json")
           fi
+          TARGET_RELEASE='${{ steps.latest.outputs.release_id }}'
+          if [[ "$CURRENT_RELEASE" == "$TARGET_RELEASE" ]]; then
+            CHANGED=false
+          else
+            CHANGED=true
+          fi
+          echo "current_release=$CURRENT_RELEASE"
+          echo "target_release=$TARGET_RELEASE"
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify immutable release
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          npm run prices:archive:download -- \
+            --manifest-key='${{ steps.latest.outputs.manifest_key }}' \
+            --out="$RUNNER_TEMP/price-assets"
+          npm run prices:validate -- --dir="$RUNNER_TEMP/price-assets"
+
+      - name: Publish static price Worker
+        if: steps.compare.outputs.changed == 'true'
+        run: npm run prices:publish -- --dir="$RUNNER_TEMP/price-assets" --target=production --name="$PRICE_ASSETS_WORKER_NAME"
+
+      - name: Verify deployed release and representative App
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/deployed-manifest.json"
+          jq -e --arg release '${{ steps.latest.outputs.release_id }}' '.releaseId == $release and .complete == true' "$RUNNER_TEMP/deployed-manifest.json"
+          APP_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(Object.keys(x.apps)[0])" "$RUNNER_TEMP/price-assets/v1/index.json.gz")
+          curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/apps/$APP_ID.json" | jq -e --arg release '${{ steps.latest.outputs.release_id }}' '.releaseId == $release and (.products | length) > 0'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/apps/does-not-exist.json")" = 404
+
+      - name: Record no-change result
+        if: steps.compare.outputs.changed == 'false'
+        run: echo "Static price release ${{ steps.latest.outputs.release_id }} is already live; no deployment performed."

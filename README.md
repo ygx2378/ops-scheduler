@@ -22,16 +22,28 @@ in this repository.
 | Workflow | UTC schedule | Purpose |
 | --- | --- | --- |
 | Apple App Store price monitor | hourly at `:15` and `:45` | Low-rate sentinel checks and one regional fanout slice |
-| Publish verified App Store price updates | hourly at `:05`; Saturday `19:30` cycle | Publish eligible price events, deploy, and prewarm |
+| Publish static per-App price assets | hourly at `:35` | Compare the immutable R2 release pointer, publish only a new version, and verify readback |
 | Discover new Apple apps | daily `03:17` | Discover new apps from selected Apple charts |
 | Drain crawl jobs backlog | daily `08:17` | Process a bounded Apple Lookup backlog |
-| Sync appstoreprice data | Monday `03:47`; daily `14:17` | Best-effort pool discovery and a small detail batch |
-| Monthly full snapshots and sitemap | day 1 at `03:30` | Full R2/static refresh and deployment |
 | Refresh purchase channel offers | daily `01:20` | Refresh enabled purchase-channel offers |
 | Verify private source checkout | manual only | Validate private source access without deploying |
 
-The appstoreprice job is a small best-effort supplement. Bulk refreshes remain a
-local SQLite operation followed by an incremental D1 upsert.
+## Local catalog refreshes
+
+Complete appstoreprice collection and full R2 refreshes run on the independent
+local collector, not on GitHub-hosted runners:
+
+- Local SQLite keeps the complete cold catalog and regional prices.
+- Production D1 keeps hot-500 and Apple-official current prices plus lightweight
+  identity, queue, and ranking data.
+- R2 v1 stores the complete app index, paged catalog, categories, regions, and
+  rankings generated from local SQLite.
+- R2 v2 stores complete per-App product and regional price details generated
+  from local SQLite; runtime D1 values override hot/official prices.
+
+The repository keeps disabled manual copies of the old appstoreprice and monthly
+full-snapshot workflows only as guardrails and historical reference. They must
+not be scheduled or enabled without a complete local SQLite source.
 
 ## Required repository secrets
 
@@ -41,6 +53,9 @@ local SQLite operation followed by an incremental D1 upsert.
 - `CLOUDFLARE_API_TOKEN`
 - `CATALOG_D1_DATABASE`
 - `CATALOG_R2_BUCKET`
+- `PRICE_ASSETS_ARCHIVE_BUCKET`
+- `PRICE_ASSETS_WORKER_NAME`
+- `PRICE_ASSETS_PUBLIC_URL`
 
 Optional discovery-email secrets:
 
@@ -56,12 +71,13 @@ production secrets.
 ## Failure behavior
 
 - A monitor run with no confirmed price change is a successful no-op.
-- A publisher run with no eligible event skips R2 refresh, build, and deploy.
-- A failed publish batch is returned to `pending`; it is not discarded.
+- A publisher run whose immutable release is already live exits successfully without downloading or deploying.
+- A changed release is downloaded from the private R2 archive, verified by per-chunk and archive SHA-256, then published and read back through the public Worker.
+- A failed static-price publish does not modify D1 event state; the same immutable release remains available for the next retry.
 - A failed regional fanout slice is requeued with its cursor preserved.
-- The publisher hydrates the complete category source before generating static
-  inputs, uploads OpenNext cache objects, deploys, prewarms, and only then marks
-  the batch complete.
+- The local collector owns complete SQLite-to-R2 archive creation and the main
+  site `cf:release` page-sync gate; this public workflow owns only static price
+  Worker activation.
 - Workflow commits may include controlled generated build inputs only. R2
   snapshot directories ignored by the private source repository must not be
   force-added.
