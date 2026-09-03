@@ -3,6 +3,7 @@ name: Publish static per-App price assets
 on:
   schedule:
     - cron: "35 * * * *"
+    - cron: "15 4 * * 0"
   workflow_dispatch:
     inputs:
       manifest_key:
@@ -10,6 +11,14 @@ on:
         required: false
         default: ""
         type: string
+      publish_mode:
+        description: "immediate publishes due major events; cycle publishes all pending events"
+        required: false
+        default: immediate
+        type: choice
+        options:
+          - immediate
+          - cycle
 
 permissions:
   contents: read
@@ -24,10 +33,12 @@ jobs:
     timeout-minutes: 30
     env:
       R2_BUCKET_NAME: ${{ secrets.PRICE_ASSETS_ARCHIVE_BUCKET }}
+      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
       PRICE_ASSETS_WORKER_NAME: ${{ secrets.PRICE_ASSETS_WORKER_NAME }}
       PRICE_ASSETS_PUBLIC_URL: ${{ secrets.PRICE_ASSETS_PUBLIC_URL }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PUBLISH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_mode || (github.event.schedule == '15 4 * * 0' && 'cycle' || 'immediate') }}
 
     steps:
       - name: Check out private source repository
@@ -118,3 +129,69 @@ jobs:
       - name: Record no-change result
         if: steps.compare.outputs.changed == 'false'
         run: echo "Static price release ${{ steps.latest.outputs.release_id }} is already live; no deployment performed."
+
+      - name: Claim due official price events
+        id: claim_events
+        run: |
+          set -euo pipefail
+          RESULT=$(npm run apple:monitor:publish-state -- claim --remote --publish-mode "$PUBLISH_MODE" | tail -n 1)
+          echo "$RESULT"
+          echo "claimed=$(printf '%s' "$RESULT" | jq -r '.claimed // false')" >> "$GITHUB_OUTPUT"
+          echo "batch_id=$(printf '%s' "$RESULT" | jq -r '.batchId // empty')" >> "$GITHUB_OUTPUT"
+
+      - name: Apply and publish official price event batch
+        id: event_release
+        if: steps.claim_events.outputs.claimed == 'true'
+        run: |
+          set -euo pipefail
+          EVENTS_FILE="$RUNNER_TEMP/price-events.json"
+          BASE_DIR="$RUNNER_TEMP/price-assets"
+          if [[ ! -f "$BASE_DIR/v1/manifest.json.gz" ]]; then
+            npm run prices:archive:download -- \
+              --manifest-key='${{ steps.latest.outputs.manifest_key }}' \
+              --out="$BASE_DIR"
+            npm run prices:validate -- --dir="$BASE_DIR"
+          fi
+          npm run apple:monitor:publish-state -- export --remote \
+            --batch-id='${{ steps.claim_events.outputs.batch_id }}' | tail -n 1 > "$EVENTS_FILE"
+          npm run prices:apply-events -- \
+            --base="$BASE_DIR" \
+            --events="$EVENTS_FILE" \
+            --batch-id='${{ steps.claim_events.outputs.batch_id }}' \
+            --out="$RUNNER_TEMP/price-assets-event"
+          npm run prices:validate -- --dir="$RUNNER_TEMP/price-assets-event"
+          RELEASE_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.releaseId)" "$RUNNER_TEMP/price-assets-event/v1/manifest.json.gz")
+          npm run prices:archive -- \
+            --dir="$RUNNER_TEMP/price-assets-event" \
+            --out="$RUNNER_TEMP/${RELEASE_ID}.tar.gz"
+          npm run prices:archive:upload -- \
+            --archive="$RUNNER_TEMP/${RELEASE_ID}.tar.gz" \
+            --transport=wrangler
+          npm run prices:publish -- \
+            --dir="$RUNNER_TEMP/price-assets-event" \
+            --target=production \
+            --name="$PRICE_ASSETS_WORKER_NAME"
+          curl --fail --silent --show-error --max-time 30 \
+            "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/event-deployed-manifest.json"
+          jq -e --arg release "$RELEASE_ID" \
+            '.releaseId == $release and .complete == true and .patch == true' \
+            "$RUNNER_TEMP/event-deployed-manifest.json"
+          APP_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.changedAppIds[0])" "$RUNNER_TEMP/price-assets-event/v1/manifest.json.gz")
+          curl --fail --silent --show-error --max-time 30 \
+            "$PRICE_ASSETS_PUBLIC_URL/v1/apps/$APP_ID.json" | \
+            jq -e --arg release "$RELEASE_ID" '.releaseId == $release and (.products | length) > 0'
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Complete official price event batch
+        if: always() && steps.claim_events.outputs.claimed == 'true' && steps.event_release.outcome == 'success'
+        run: |
+          npm run apple:monitor:publish-state -- complete --remote \
+            --batch-id='${{ steps.claim_events.outputs.batch_id }}'
+
+      - name: Requeue failed official price event batch
+        if: always() && steps.claim_events.outputs.claimed == 'true' && steps.event_release.outcome == 'failure'
+        env:
+          PRICE_PUBLISH_ERROR: Static per-App price event release failed before readback
+        run: |
+          npm run apple:monitor:publish-state -- complete --remote \
+            --batch-id='${{ steps.claim_events.outputs.batch_id }}' --failed
