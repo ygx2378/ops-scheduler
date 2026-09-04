@@ -1,0 +1,81 @@
+name: Refresh static region pages
+
+on:
+  schedule:
+    - cron: "27 3 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: static-region-pages
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      R2_BUCKET_NAME: ${{ secrets.CATALOG_R2_BUCKET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check refresh configuration
+        run: |
+          set -euo pipefail
+          test -n "${R2_BUCKET_NAME:-}"
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
+          test -n "${CLOUDFLARE_API_TOKEN:-}"
+
+      - name: Download region snapshots from R2
+        run: npm run r2:download-region-snapshots
+
+      - name: Generate and validate monthly region artifact
+        id: generate
+        run: |
+          set -euo pipefail
+          RESULT=$(npm run static:generate-region-pages | tail -n 1)
+          echo "$RESULT"
+          CHANGED=$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.changed))' "$RESULT")
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          npm run static:validate
+          npm run static:validate-prerender
+
+      - name: Build, deploy, and prewarm changed region pages
+        id: release
+        if: steps.generate.outputs.changed == 'true'
+        run: npm run cf:release
+
+      - name: Commit changed region artifact
+        if: steps.generate.outputs.changed == 'true' && steps.release.outcome == 'success'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build-data/static-region-page-snapshots.json src/lib/catalog/static-region-sitemap-data.ts
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): refresh monthly static region pages"
+            git push origin "HEAD:main"
+          fi
+
+      - name: Record unchanged result
+        if: steps.generate.outputs.changed == 'false'
+        run: echo "Region page artifact unchanged; no main-site build or deployment performed."

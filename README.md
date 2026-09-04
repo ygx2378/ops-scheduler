@@ -26,6 +26,7 @@ in this repository.
 | Discover new Apple apps | daily `03:17` | Discover new apps from selected Apple charts |
 | Drain crawl jobs backlog | daily `08:17` | Process a bounded Apple Lookup backlog |
 | Refresh purchase channel offers | daily `01:20` | Refresh enabled purchase-channel offers |
+| Refresh static region pages | monthly at `03:27` UTC | Download region snapshots from R2; update pages and sitemap only when region data changes |
 | Verify private source checkout | manual only | Validate private source access without deploying |
 
 ## Local catalog refreshes
