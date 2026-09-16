@@ -121,10 +121,27 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/deployed-manifest.json"
-          jq -e --arg release '${{ steps.latest.outputs.release_id }}' '.releaseId == $release and .complete == true' "$RUNNER_TEMP/deployed-manifest.json"
+          RELEASE_VERIFIED=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/deployed-manifest.json" \
+              && jq -e --arg release '${{ steps.latest.outputs.release_id }}' '.releaseId == $release and .complete == true' "$RUNNER_TEMP/deployed-manifest.json" > /dev/null; then
+              RELEASE_VERIFIED=true
+              break
+            fi
+            sleep 5
+          done
+          test "$RELEASE_VERIFIED" = true
           APP_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(Object.keys(x.apps)[0])" "$RUNNER_TEMP/price-assets/v1/index.json.gz")
-          curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/apps/$APP_ID.json" | jq -e --arg release '${{ steps.latest.outputs.release_id }}' '.releaseId == $release and (.products | length) > 0'
+          APP_VERIFIED=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/apps/$APP_ID.json" \
+              | jq -e --arg release '${{ steps.latest.outputs.release_id }}' '.releaseId == $release and (.products | length) > 0' > /dev/null; then
+              APP_VERIFIED=true
+              break
+            fi
+            sleep 5
+          done
+          test "$APP_VERIFIED" = true
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 30 "$PRICE_ASSETS_PUBLIC_URL/v1/apps/does-not-exist.json")" = 404
 
       - name: Record no-change result
@@ -174,15 +191,31 @@ jobs:
             --dir="$RUNNER_TEMP/price-assets-event" \
             --target=production \
             --name="$PRICE_ASSETS_WORKER_NAME"
-          curl --fail --silent --show-error --max-time 30 \
-            "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/event-deployed-manifest.json"
-          jq -e --arg release "$RELEASE_ID" \
-            '.releaseId == $release and .complete == true and .patch == true' \
-            "$RUNNER_TEMP/event-deployed-manifest.json"
+          RELEASE_VERIFIED=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --max-time 30 \
+              "$PRICE_ASSETS_PUBLIC_URL/v1/manifest.json" > "$RUNNER_TEMP/event-deployed-manifest.json" \
+              && jq -e --arg release "$RELEASE_ID" \
+                '.releaseId == $release and .complete == true and .patch == true' \
+                "$RUNNER_TEMP/event-deployed-manifest.json" > /dev/null; then
+              RELEASE_VERIFIED=true
+              break
+            fi
+            sleep 5
+          done
+          test "$RELEASE_VERIFIED" = true
           APP_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.changedAppIds[0])" "$RUNNER_TEMP/price-assets-event/v1/manifest.json.gz")
-          curl --fail --silent --show-error --max-time 30 \
-            "$PRICE_ASSETS_PUBLIC_URL/v1/apps/$APP_ID.json" | \
-            jq -e --arg release "$RELEASE_ID" '.releaseId == $release and (.products | length) > 0'
+          APP_VERIFIED=false
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error --max-time 30 \
+              "$PRICE_ASSETS_PUBLIC_URL/v1/apps/$APP_ID.json" | \
+              jq -e --arg release "$RELEASE_ID" '.releaseId == $release and (.products | length) > 0' > /dev/null; then
+              APP_VERIFIED=true
+              break
+            fi
+            sleep 5
+          done
+          test "$APP_VERIFIED" = true
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Complete official price event batch
