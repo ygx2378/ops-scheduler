@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "20 1 * * *"
   workflow_dispatch:
+    inputs:
+      groups:
+        description: "Optional comma-separated purchase page groups to force, for example buy-index,buy-chatgpt"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -15,7 +21,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - name: Check out private source repository
         uses: actions/checkout@v4
@@ -28,6 +34,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Refresh public channel prices
         env:
@@ -41,12 +51,65 @@ jobs:
           npm run buy:validate-channels
 
       - name: Commit changed snapshot
+        id: snapshot
         run: |
+          set -euo pipefail
           if git diff --quiet -- src/lib/purchase-channel-offers.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/lib/purchase-channel-offers.json
           git commit -m "chore: refresh purchase channel offers"
+          git push
+
+      - name: Check purchase page publishing configuration
+        env:
+          PURCHASE_PAGES_WORKER_NAME_PREFIX: ${{ secrets.PURCHASE_PAGES_WORKER_NAME_PREFIX }}
+          PURCHASE_PAGES_DISPATCHER_WORKER_NAME: ${{ secrets.PURCHASE_PAGES_DISPATCHER_WORKER_NAME }}
+          PURCHASE_PAGES_WORKERS_DOMAIN: ${{ secrets.PURCHASE_PAGES_WORKERS_DOMAIN }}
+          MAIN_SITE_WORKER_NAME: ${{ secrets.MAIN_SITE_WORKER_NAME }}
+        run: |
+          set -euo pipefail
+          test -n "${PURCHASE_PAGES_WORKER_NAME_PREFIX:-}"
+          test -n "${PURCHASE_PAGES_DISPATCHER_WORKER_NAME:-}"
+          test -n "${PURCHASE_PAGES_WORKERS_DOMAIN:-}"
+          test -n "${MAIN_SITE_WORKER_NAME:-}"
+
+      - name: Build and publish changed purchase page groups
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PRICE_ASSETS_PUBLIC_URL: ${{ secrets.PRICE_ASSETS_PUBLIC_URL }}
+          PURCHASE_PAGES_WORKER_NAME_PREFIX: ${{ secrets.PURCHASE_PAGES_WORKER_NAME_PREFIX }}
+          PURCHASE_PAGES_DISPATCHER_WORKER_NAME: ${{ secrets.PURCHASE_PAGES_DISPATCHER_WORKER_NAME }}
+          PURCHASE_PAGES_WORKERS_DOMAIN: ${{ secrets.PURCHASE_PAGES_WORKERS_DOMAIN }}
+          MAIN_SITE_WORKER_NAME: ${{ secrets.MAIN_SITE_WORKER_NAME }}
+          REQUESTED_PURCHASE_GROUPS: ${{ inputs.groups }}
+        run: |
+          set -euo pipefail
+          GROUP_ARGS=()
+          if [[ -n "${REQUESTED_PURCHASE_GROUPS:-}" ]]; then
+            GROUP_ARGS+=("--groups=$REQUESTED_PURCHASE_GROUPS")
+          fi
+          npm run static:release-purchase-pages -- --execute \
+            --main-site-worker="$MAIN_SITE_WORKER_NAME" \
+            --worker-prefix="$PURCHASE_PAGES_WORKER_NAME_PREFIX" \
+            --dispatcher-name="$PURCHASE_PAGES_DISPATCHER_WORKER_NAME" \
+            --workers-domain="$PURCHASE_PAGES_WORKERS_DOMAIN" \
+            --price-assets-base-url="$PRICE_ASSETS_PUBLIC_URL" \
+            "${GROUP_ARGS[@]}"
+
+      - name: Commit purchase page deployment state
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- build-data/purchase-static-page-state.json; then
+            echo "Purchase page deployment state unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build-data/purchase-static-page-state.json
+          git commit -m "chore: record purchase page release state"
           git push
