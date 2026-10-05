@@ -1,9 +1,8 @@
-name: Apple App Store price monitor
+name: Regional Apple App Store price monitor
 
 on:
   schedule:
-    - cron: "15 * * * *"
-    - cron: "45 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -39,15 +38,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Select deterministic App and storefront shard
+      - name: Select regional App and storefront shard
         run: |
           SHARD=$(( $(date -u +%H) % 20 ))
-          if [ "$(date -u +%M)" = "15" ]; then
-            LANE=ai
-          else
-            LANE=regional
-          fi
-          node scripts/select-apple-monitor-shard.mjs --lane "$LANE" --shard "$SHARD" | tee shard.env
+          node scripts/select-apple-monitor-shard.mjs --lane regional --shard "$SHARD" | tee shard.env
           cat shard.env >> "$GITHUB_ENV"
 
       - name: Verify Apple price parser
@@ -71,13 +65,7 @@ jobs:
         run: npm run apple:prices:run -- --remote --source apple_app_store_page --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 2 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --selected-apps-only --batch 8
 
       - name: Evaluate detected price events and queue regional fanout
-        id: evaluate
-        run: |
-          RESULT=$(npm run apple:monitor:publish-state -- evaluate --remote --publish-mode immediate | tail -n 1)
-          echo "$RESULT"
-          npm run apple:monitor:fanout-state -- stats --remote
-          FANOUT=$(printf '%s' "$RESULT" | jq -r '.regionFanoutStorefronts | join(" ")')
-          echo "fanout_storefronts=$FANOUT" >> "$GITHUB_OUTPUT"
+        run: npm run apple:monitor:publish-state -- evaluate --remote --publish-mode immediate
 
       - name: Claim one regional fanout slice
         id: claim_fanout
@@ -87,6 +75,7 @@ jobs:
           echo "claimed=$(printf '%s' "$RESULT" | jq -r '.claimed')" >> "$GITHUB_OUTPUT"
           echo "storefront=$(printf '%s' "$RESULT" | jq -r '.storefrontCode // empty')" >> "$GITHUB_OUTPUT"
           echo "reset_jobs=$(printf '%s' "$RESULT" | jq -r '.resetJobs // false')" >> "$GITHUB_OUTPUT"
+          echo "app_ids=$(printf '%s' "$RESULT" | jq -r '(.appIds // []) | join(",")')" >> "$GITHUB_OUTPUT"
 
       - name: Refresh one regional fanout slice
         id: run_fanout
@@ -97,6 +86,7 @@ jobs:
           APPLE_REFRESH_DELAY_MAX_MS: 18000
           APPLE_REFRESH_QUIET: "1"
           FANOUT_STOREFRONT: ${{ steps.claim_fanout.outputs.storefront }}
+          FANOUT_APP_IDS: ${{ steps.claim_fanout.outputs.app_ids }}
         run: |
           FORCE_ARGS=""
           if [ "${{ steps.claim_fanout.outputs.reset_jobs }}" = "true" ]; then
@@ -105,6 +95,7 @@ jobs:
           npm run apple:prices:enqueue -- --remote \
             --app-tier popular --tier-popular-limit 500 --recent-click-days 3 \
             --app-limit 500 --storefront-limit 1 --storefront "$FANOUT_STOREFRONT" \
+            --app-ids "$FANOUT_APP_IDS" \
             --pages-only $FORCE_ARGS
           if [ "${{ steps.claim_fanout.outputs.reset_jobs }}" = "true" ]; then
             npm run apple:monitor:fanout-state -- mark-reset --remote --storefront "$FANOUT_STOREFRONT"
@@ -112,7 +103,8 @@ jobs:
           npm run apple:prices:run -- --remote --source apple_app_store_page \
             --app-tier popular --tier-popular-limit 500 --recent-click-days 3 \
             --app-limit 500 --storefront-limit 1 --storefront "$FANOUT_STOREFRONT" \
-            --selected-apps-only --batch 64
+            --app-ids "$FANOUT_APP_IDS" \
+            --selected-apps-only --allow-empty-selected --batch 64
 
       - name: Mark regional fanout slice complete
         if: always() && steps.claim_fanout.outputs.claimed == 'true' && steps.run_fanout.outcome == 'success'

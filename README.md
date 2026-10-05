@@ -21,11 +21,10 @@ in this repository.
 
 | Workflow | UTC schedule | Purpose |
 | --- | --- | --- |
-| Apple App Store price monitor | hourly at `:15` and `:45` | Low-rate sentinel checks and one regional fanout slice |
-| Publish static per-App price assets | hourly at `:35`, weekly cycle Sunday `04:15` UTC | Publish the immutable local release, then apply due official D1 events without a cold-price D1 import |
-| Discover new Apple apps | daily `03:17` | Discover new apps from selected Apple charts |
-| Drain crawl jobs backlog | daily `08:17` | Process a bounded Apple Lookup backlog |
-| Refresh purchase channel offers | daily `01:20` | Refresh enabled purchase-channel offers |
+| AI App Store price monitor | every 30 minutes at `:15` and `:45` | Rotate four AI sentinels through two storefronts per run |
+| Regional Apple App Store price monitor | hourly at `:00` | Rotate four regional-diversity sentinels and process one fanout slice |
+| Publish static per-App price assets | every 30 minutes at `:05` and `:35`, weekly cycle Sunday `04:15` UTC | Publish the immutable local release, then apply due official D1 events without a cold-price D1 import |
+| Refresh purchase channel offers | every 6 hours at `01:20`, `07:20`, `13:20`, and `19:20` UTC | Refresh enabled purchase-channel offers and release changed `/buy` groups only |
 | Refresh static region pages | monthly at `03:27` UTC | Download region snapshots from R2; update pages and sitemap only when region data changes |
 | Verify private source checkout | manual only | Validate private source access without deploying |
 
@@ -42,9 +41,10 @@ local collector, not on GitHub-hosted runners:
 - R2 v2 stores complete per-App product and regional price details generated
   from local SQLite; runtime D1 values override hot/official prices.
 
-The repository keeps disabled manual copies of the old appstoreprice and monthly
-full-snapshot workflows only as guardrails and historical reference. They must
-not be scheduled or enabled without a complete local SQLite source.
+The repository keeps archived copies of the old appstoreprice, discovery, crawl,
+and monthly full-snapshot workflows as guardrails and historical reference. They
+must not be re-enabled without a complete local SQLite source and an explicit
+review of the current D1/R2 boundary.
 
 ## Required repository secrets
 
