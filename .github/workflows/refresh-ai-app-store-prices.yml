@@ -1,0 +1,69 @@
+name: AI Apple App Store price monitor
+
+on:
+  schedule:
+    - cron: "15,45 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hot-app-store-price-monitor
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
+      R2_BUCKET_NAME: ${{ secrets.CATALOG_R2_BUCKET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Select rotating AI App and storefront shard
+        run: |
+          HALF_HOUR_SLOT=$(( $(date -u +%s) / 1800 ))
+          SHARD=$(( HALF_HOUR_SLOT % 20 ))
+          node scripts/select-apple-monitor-shard.mjs --lane ai --shard "$SHARD" | tee shard.env
+          cat shard.env >> "$GITHUB_ENV"
+
+      - name: Verify Apple price parser
+        run: npm run test:apple-price-parser
+
+      - name: Prepare Apple refresh tables
+        run: npm run apple:prices:init -- --remote
+
+      - name: Queue AI sentinel price refresh
+        run: npm run apple:prices:enqueue -- --remote --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 2 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --pages-only --force
+
+      - name: Reset stale running jobs
+        run: npm run apple:prices:reset-running -- --remote
+
+      - name: Refresh AI sentinel prices
+        env:
+          APPLE_REFRESH_BATCH: 8
+          APPLE_REFRESH_DELAY_MIN_MS: 12000
+          APPLE_REFRESH_DELAY_MAX_MS: 18000
+          APPLE_REFRESH_QUIET: "1"
+        run: npm run apple:prices:run -- --remote --source apple_app_store_page --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 2 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --selected-apps-only --batch 8
+
+      - name: Evaluate detected price events and queue regional fanout
+        run: npm run apple:monitor:publish-state -- evaluate --remote --publish-mode immediate
