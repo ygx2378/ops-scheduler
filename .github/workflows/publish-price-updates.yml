@@ -57,6 +57,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Confirm Grok web subscriptions stay separate from App Store IAP
+        run: npm run buy:validate-grok-contract -- --config-only
+
       - name: Check publishing configuration
         run: |
           set -euo pipefail

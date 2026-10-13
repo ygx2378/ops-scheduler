@@ -51,10 +51,18 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PRICE_ASSETS_PUBLIC_URL: ${{ secrets.PRICE_ASSETS_PUBLIC_URL }}
         run: |
+          npm run buy:validate-grok-contract -- --config-only
           npm run buy:validate-channels -- --config-only
           test -n "${PRICE_ASSETS_PUBLIC_URL:-}"
           npm run buy:refresh-offers -- --remote-app-store
           npm run buy:validate-channels
+          npm run buy:validate-grok-contract
+
+      - name: Validate committed offer snapshot before page-only release
+        if: ${{ inputs.publish_only == true }}
+        run: |
+          npm run buy:validate-channels
+          npm run buy:validate-grok-contract
 
       - name: Commit changed snapshot
         if: ${{ inputs.publish_only != true }}
