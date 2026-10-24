@@ -166,6 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           EVENTS_FILE="$RUNNER_TEMP/price-events.json"
+          EVENT_REPORT="$RUNNER_TEMP/price-event-report.json"
           BASE_DIR="$RUNNER_TEMP/price-assets"
           if [[ ! -f "$BASE_DIR/v1/manifest.json.gz" ]]; then
             npm run prices:archive:download -- \
@@ -179,7 +180,19 @@ jobs:
             --base="$BASE_DIR" \
             --events="$EVENTS_FILE" \
             --batch-id='${{ steps.claim_events.outputs.batch_id }}' \
+            --report="$EVENT_REPORT" \
             --out="$RUNNER_TEMP/price-assets-event"
+          APPLIED_EVENT_IDS=$(jq -r '.appliedEventIds | join(",")' "$EVENT_REPORT")
+          DEFERRED_EVENT_COUNT=$(jq -r '.deferredEventIds | length' "$EVENT_REPORT")
+          echo "published_event_ids=$APPLIED_EVENT_IDS" >> "$GITHUB_OUTPUT"
+          if (( DEFERRED_EVENT_COUNT > 0 )); then
+            echo "Deferred $DEFERRED_EVENT_COUNT events because their App or product is not in the active complete price archive." >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.deferredEvents[] | "- App \(.appStoreId), event \(.eventId), product \(.productKey): \(.reason)"' "$EVENT_REPORT" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -z "$APPLIED_EVENT_IDS" ]]; then
+            echo "No event matches the active complete price archive. The events remain pending and will be retried after the cooldown or on the next price cycle."
+            exit 0
+          fi
           npm run prices:validate -- --dir="$RUNNER_TEMP/price-assets-event"
           BASE_RELEASE_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.releaseId)" "$BASE_DIR/v1/manifest.json.gz")
           RELEASE_ID=$(node -e "const z=require('node:zlib');const f=require('node:fs');const x=JSON.parse(z.gunzipSync(f.readFileSync(process.argv[1])));process.stdout.write(x.releaseId)" "$RUNNER_TEMP/price-assets-event/v1/manifest.json.gz")
@@ -225,7 +238,8 @@ jobs:
         if: always() && steps.claim_events.outputs.claimed == 'true' && steps.event_release.outcome == 'success'
         run: |
           npm run apple:monitor:publish-state -- complete --remote \
-            --batch-id='${{ steps.claim_events.outputs.batch_id }}'
+            --batch-id='${{ steps.claim_events.outputs.batch_id }}' \
+            --published-event-ids='${{ steps.event_release.outputs.published_event_ids }}'
 
       - name: Requeue failed official price event batch
         if: always() && steps.claim_events.outputs.claimed == 'true' && steps.event_release.outcome == 'failure'
