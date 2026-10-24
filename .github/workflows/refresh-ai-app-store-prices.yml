@@ -10,7 +10,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: hot-app-store-price-monitor
+  group: ai-app-store-price-monitor
   cancel-in-progress: false
 
 jobs:
