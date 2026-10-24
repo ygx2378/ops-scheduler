@@ -2,9 +2,22 @@ name: Refresh purchase channel offers
 
 on:
   schedule:
-    - cron: "20 1,7,13,19 * * *"
+    - cron: "20 */2 * * *"
   workflow_dispatch:
     inputs:
+      refresh_mode:
+        description: "Refresh all channels or only App Store offers from published price assets"
+        required: false
+        default: all-sources
+        type: choice
+        options:
+          - all-sources
+          - app-store-only
+      products:
+        description: "Optional comma-separated product keys for an App Store-only refresh"
+        required: false
+        default: "chatgpt,claude,gemini,grok"
+        type: string
       groups:
         description: "Optional comma-separated purchase page groups to force, for example buy-index,buy-chatgpt"
         required: false
@@ -47,14 +60,23 @@ jobs:
       - name: Refresh public channel prices
         if: ${{ inputs.publish_only != true }}
         env:
+          D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PRICE_ASSETS_PUBLIC_URL: ${{ secrets.PRICE_ASSETS_PUBLIC_URL }}
+          AI_MONITOR_COVERAGE: "1"
+          REFRESH_MODE: ${{ inputs.refresh_mode || 'all-sources' }}
+          REQUESTED_PRODUCTS: ${{ inputs.products || 'chatgpt,claude,gemini,grok' }}
         run: |
+          set -euo pipefail
           npm run buy:validate-grok-contract -- --config-only
           npm run buy:validate-channels -- --config-only
           test -n "${PRICE_ASSETS_PUBLIC_URL:-}"
-          npm run buy:refresh-offers -- --remote-app-store
+          if [[ "$REFRESH_MODE" == "app-store-only" ]]; then
+            npm run buy:refresh-offers -- --remote-app-store --sources=apple-app-store --products="$REQUESTED_PRODUCTS"
+          else
+            npm run buy:refresh-offers -- --remote-app-store
+          fi
           npm run buy:validate-channels
           npm run buy:validate-grok-contract
 
@@ -115,6 +137,9 @@ jobs:
             --workers-domain="$PURCHASE_PAGES_WORKERS_DOMAIN" \
             --price-assets-base-url="$PRICE_ASSETS_PUBLIC_URL" \
             "${GROUP_ARGS[@]}"
+
+      - name: Verify Gemini purchase pages and their static assets
+        run: npm run buy:probe-pages -- /buy/gemini /en/buy/gemini
 
       - name: Commit purchase page deployment state
         run: |
