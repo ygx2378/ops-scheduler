@@ -40,6 +40,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check D1 daily quota before monitoring
+        # Exit 1 = daily read/write quota nearly used or D1 at its size budget; exit 2 is a size warning only.
+        run: node scripts/check-d1-size.mjs --max-rows-written=95000 --max-rows-read=4500000 || [ $? -eq 2 ]
+
       - name: Select rotating AI App and storefront shard
         run: |
           LAST_SUCCESS=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/refresh-ai-app-store-prices.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].run_number // empty')
@@ -69,7 +73,7 @@ jobs:
           APPLE_REFRESH_DELAY_MIN_MS: 12000
           APPLE_REFRESH_DELAY_MAX_MS: 18000
           APPLE_REFRESH_QUIET: "1"
-        run: npm run apple:prices:run -- --remote --source apple_app_store_page --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 4 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --selected-apps-only --batch 16
+        run: npm run apple:prices:run -- --remote --source apple_app_store_page --app-tier popular --tier-popular-limit 500 --recent-click-days 3 --app-limit 4 --storefront-limit 4 $APPLE_STOREFRONT_ARGS $APPLE_APP_STORE_ARGS --selected-apps-only --allow-partial-failure --batch 16
 
       - name: Evaluate detected price events and queue regional fanout
         run: npm run apple:monitor:publish-state -- evaluate --remote --publish-mode immediate
