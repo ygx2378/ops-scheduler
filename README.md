@@ -28,6 +28,10 @@ in this repository.
 | Refresh static region pages | monthly at `03:27` UTC | Download region snapshots from R2; update pages and sitemap only when region data changes |
 | Verify private source checkout | manual only | Validate private source access without deploying |
 
+The AI monitor, regional monitor and price publisher are also started every
+15 minutes by the [cron dispatcher Worker](cron-dispatcher/README.md), because
+GitHub drops many frequent `schedule` events.
+
 ## Local catalog refreshes
 
 Complete appstoreprice collection and full R2 refreshes run on the independent

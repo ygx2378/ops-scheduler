@@ -1,0 +1,10 @@
+# The Worker name and GITHUB_REPOSITORY are supplied at deploy time, and
+# GITHUB_TOKEN is a Worker secret, so no identifiers live in this public file:
+#   npx wrangler deploy --name <worker-name> --var GITHUB_REPOSITORY:<owner/repo>
+#   npx wrangler secret put GITHUB_TOKEN --name <worker-name>
+main = "src/index.mjs"
+compatibility_date = "2026-06-17"
+workers_dev = false
+
+[triggers]
+crons = ["*/15 * * * *"]
