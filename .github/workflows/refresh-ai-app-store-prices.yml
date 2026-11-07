@@ -2,7 +2,9 @@ name: AI Apple App Store price monitor
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # The cron dispatcher Worker starts this every 15 minutes; this sparse
+    # GitHub cron is only a fallback if the Worker stops.
+    - cron: "50 */3 * * *"
   workflow_dispatch:
 
 permissions:

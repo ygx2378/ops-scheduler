@@ -16,6 +16,12 @@ test("regional monitor runs hourly at :00", () => {
   assert.ok(!workflows("2026-11-09T10:30:00Z").includes("refresh-popularity-snapshots.yml"));
 });
 
+test("purchase offers refresh every two hours at :30", () => {
+  assert.ok(workflows("2026-11-09T10:30:00Z").includes("refresh-purchase-channel-offers.yml"));
+  assert.ok(!workflows("2026-11-09T11:30:00Z").includes("refresh-purchase-channel-offers.yml"));
+  assert.ok(!workflows("2026-11-09T10:00:00Z").includes("refresh-purchase-channel-offers.yml"));
+});
+
 test("price publishing runs at :15 and :45, with the weekly cycle on Sunday 04:15", () => {
   const publish = (iso) => plannedDispatches(new Date(iso)).find((item) => item.workflow === "publish-price-updates.yml");
   assert.equal(publish("2026-11-09T10:00:00Z"), undefined);
@@ -26,7 +32,7 @@ test("price publishing runs at :15 and :45, with the weekly cycle on Sunday 04:1
   assert.deepEqual(publish("2026-11-08T04:45:00Z").inputs, { publish_mode: "immediate" });
 });
 
-test("a day dispatches 96 AI, 24 regional and 48 publish runs", () => {
+test("a day dispatches 96 AI, 24 regional, 48 publish and 12 purchase-offer runs", () => {
   const counts = {};
   for (let tick = 0; tick < 96; tick += 1) {
     for (const item of plannedDispatches(new Date(Date.UTC(2026, 10, 9, 0, tick * 15)))) {
@@ -37,5 +43,6 @@ test("a day dispatches 96 AI, 24 regional and 48 publish runs", () => {
     "refresh-ai-app-store-prices.yml": 96,
     "refresh-popularity-snapshots.yml": 24,
     "publish-price-updates.yml": 48,
+    "refresh-purchase-channel-offers.yml": 12,
   });
 });

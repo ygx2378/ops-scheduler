@@ -21,16 +21,17 @@ in this repository.
 
 | Workflow | UTC schedule | Purpose |
 | --- | --- | --- |
-| AI App Store price monitor | every 30 minutes at `:15` and `:45` | Rotate four AI sentinels through two storefronts per run |
-| Regional Apple App Store price monitor | hourly at `:00` | Rotate four regional-diversity sentinels and process one fanout slice |
-| Publish static per-App price assets | every 30 minutes at `:05` and `:35`, weekly cycle Sunday `04:15` UTC | Publish the immutable local release, then apply due official D1 events without a cold-price D1 import |
-| Refresh purchase channel offers | every 6 hours at `01:20`, `07:20`, `13:20`, and `19:20` UTC | Refresh enabled purchase-channel offers and release changed `/buy` groups only |
+| AI App Store price monitor | Worker every 15 minutes; GitHub fallback `50 */3` | Rotate four AI sentinels through four storefronts per run |
+| Regional Apple App Store price monitor | Worker hourly at `:00`; GitHub fallback `40 */6` | Rotate four regional-diversity sentinels and process one fanout slice |
+| Publish static per-App price assets | Worker at `:15` and `:45`, weekly cycle Sunday `04:15` UTC; GitHub fallback `25 */4` and Sunday `04:15` | Publish the immutable local release, then apply due official D1 events without a cold-price D1 import |
+| Refresh purchase channel offers | Worker every two hours at `:30` (even hours); GitHub fallback `20 */6` | Refresh enabled purchase-channel offers and release changed `/buy` groups only |
 | Refresh static region pages | monthly at `03:27` UTC | Download region snapshots from R2; update pages and sitemap only when region data changes |
 | Verify private source checkout | manual only | Validate private source access without deploying |
 
-The AI monitor, regional monitor and price publisher are also started every
-15 minutes by the [cron dispatcher Worker](cron-dispatcher/README.md), because
-GitHub drops many frequent `schedule` events.
+The [cron dispatcher Worker](cron-dispatcher/README.md) is the primary trigger
+for the four frequent workflows, because GitHub dropped about nine in ten of
+their `schedule` events. Their GitHub crons are sparse fallbacks; if the Worker
+stops, restore their original frequency until it is fixed.
 
 ## Local catalog refreshes
 
