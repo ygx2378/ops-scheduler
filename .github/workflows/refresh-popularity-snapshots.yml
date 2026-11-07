@@ -2,7 +2,8 @@ name: Regional Apple App Store price monitor
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    # The cron dispatcher Worker starts this hourly; fallback only.
+    - cron: "40 */6 * * *"
   workflow_dispatch:
 
 permissions:
