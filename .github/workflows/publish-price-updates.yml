@@ -176,13 +176,23 @@ jobs:
           EVENTS_FILE="$RUNNER_TEMP/price-events.json"
           EVENT_REPORT="$RUNNER_TEMP/price-event-report.json"
           BASE_DIR="$RUNNER_TEMP/price-assets"
+          npm run apple:monitor:publish-state -- official --remote | tail -n 1 > "$OFFICIAL_FILE"
+          if [[ '${{ steps.claim_events.outputs.claimed }}' != 'true' ]]; then
+            # Checked against the live per-App JSON, so an idle run never
+            # downloads the complete archive.
+            MATERIAL=$(npm run --silent prices:official-check -- \
+              --official="$OFFICIAL_FILE" --base-url="$PRICE_ASSETS_PUBLIC_URL" | tail -n 1 | jq -r '.materialAppIds | length')
+            if [[ "$MATERIAL" == "0" ]]; then
+              echo "No price event is due and the official catalog is already in sync."
+              exit 0
+            fi
+          fi
           if [[ ! -f "$BASE_DIR/v1/manifest.json.gz" ]]; then
             npm run prices:archive:download -- \
               --manifest-key='${{ steps.latest.outputs.manifest_key }}' \
               --out="$BASE_DIR"
             npm run prices:validate -- --dir="$BASE_DIR"
           fi
-          npm run apple:monitor:publish-state -- official --remote | tail -n 1 > "$OFFICIAL_FILE"
           EVENT_ARGS=()
           if [[ '${{ steps.claim_events.outputs.claimed }}' == 'true' ]]; then
             npm run apple:monitor:publish-state -- export --remote \
