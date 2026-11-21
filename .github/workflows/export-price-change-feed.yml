@@ -1,0 +1,54 @@
+name: Export price-change feed
+
+on:
+  schedule:
+    # The cron dispatcher Worker starts this every six hours; fallback only.
+    - cron: "5 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: price-change-feed
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      D1_DATABASE_NAME: ${{ secrets.CATALOG_D1_DATABASE }}
+      R2_BUCKET_NAME: ${{ secrets.PRICE_ASSETS_ARCHIVE_BUCKET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Check out private source repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.SOURCE_REPOSITORY }}
+          token: ${{ secrets.SOURCE_REPOSITORY_TOKEN }}
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify feed filters
+        run: npm run test:price-change-feed
+
+      # Reads published monitor events from D1 (at most 3,000 rows) and
+      # replaces one R2 snapshot object; it never writes to D1.
+      - name: Export and upload the feed
+        run: |
+          set -euo pipefail
+          test -n "${D1_DATABASE_NAME:-}"
+          test -n "${R2_BUCKET_NAME:-}"
+          npm run feed:export-price-changes -- --out="$RUNNER_TEMP/price-changes.json" --upload
+          jq -e '(.data | length) > 0' "$RUNNER_TEMP/price-changes.json" > /dev/null
+          echo "Price-change feed: $(jq '.data | length' "$RUNNER_TEMP/price-changes.json") items" >> "$GITHUB_STEP_SUMMARY"

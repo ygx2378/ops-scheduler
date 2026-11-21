@@ -15,6 +15,11 @@ export function plannedDispatches(date) {
     dispatches.push({ workflow: "refresh-popularity-snapshots.yml" });
   }
 
+  // Price-change feed for /price-changes, every six hours from 01:00.
+  if (minute === 0 && date.getUTCHours() % 6 === 1) {
+    dispatches.push({ workflow: "export-price-change-feed.yml" });
+  }
+
   // All-sources purchase-offer refresh every two hours, between publishes.
   if (minute === 30 && date.getUTCHours() % 2 === 0) {
     dispatches.push({ workflow: "refresh-purchase-channel-offers.yml" });

@@ -10,6 +10,7 @@ fires every 15 minutes and starts the workflows through `workflow_dispatch`:
 | `:00` | `refresh-popularity-snapshots.yml` |
 | `:15`, `:45` | `publish-price-updates.yml` (`immediate`; Sunday `04:15` runs `cycle`) |
 | `:30` on even hours | `refresh-purchase-channel-offers.yml` (`all-sources`) |
+| `:00` at 01, 07, 13, 19 | `export-price-change-feed.yml` |
 
 The workflow files stay the only definition of each job. Their own GitHub crons
 are sparse fallbacks (every 3-6 hours); every workflow uses a concurrency group,

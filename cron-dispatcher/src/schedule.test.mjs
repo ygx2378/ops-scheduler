@@ -32,7 +32,14 @@ test("price publishing runs at :15 and :45, with the weekly cycle on Sunday 04:1
   assert.deepEqual(publish("2026-11-08T04:45:00Z").inputs, { publish_mode: "immediate" });
 });
 
-test("a day dispatches 96 AI, 24 regional, 48 publish and 12 purchase-offer runs", () => {
+test("price-change feed exports every six hours at :00 from 01:00", () => {
+  assert.ok(workflows("2026-11-09T01:00:00Z").includes("export-price-change-feed.yml"));
+  assert.ok(workflows("2026-11-09T19:00:00Z").includes("export-price-change-feed.yml"));
+  assert.ok(!workflows("2026-11-09T02:00:00Z").includes("export-price-change-feed.yml"));
+  assert.ok(!workflows("2026-11-09T01:15:00Z").includes("export-price-change-feed.yml"));
+});
+
+test("a day dispatches 96 AI, 24 regional, 48 publish, 12 purchase-offer and 4 feed runs", () => {
   const counts = {};
   for (let tick = 0; tick < 96; tick += 1) {
     for (const item of plannedDispatches(new Date(Date.UTC(2026, 10, 9, 0, tick * 15)))) {
@@ -44,5 +51,6 @@ test("a day dispatches 96 AI, 24 regional, 48 publish and 12 purchase-offer runs
     "refresh-popularity-snapshots.yml": 24,
     "publish-price-updates.yml": 48,
     "refresh-purchase-channel-offers.yml": 12,
+    "export-price-change-feed.yml": 4,
   });
 });
